@@ -51,8 +51,8 @@ defmodule Coverex.Task do
           puts_module_overview(mods)
         end
         # ask for coveralls option
-        if (running_travis?() and post_to_coveralls?(opts)) do
-          post_coveralls(:cover.modules, output, travis_job_id())
+        if post_to_coveralls?(opts) && (ci = ci_info()) do
+          post_coveralls(:cover.modules, output, ci)
         end
       end
     end
@@ -69,30 +69,63 @@ defmodule Coverex.Task do
       Keyword.get(opts, :coveralls, false)
     end
 
-    @spec running_travis?(%{String.t => String.t}) :: String.t
-    def running_travis?(env \\ System.get_env()) do
-      case env["TRAVIS"] do
-        "true" -> true
-        _ -> false
+    @doc "gets CI information from environment"
+    @spec ci_info(%{String.t => String.t}) :: %{atom => String.t} | nil
+    def ci_info(env \\ System.get_env()) do
+      cond do
+        running_travis?(env) -> travis_ci_info(env)
+        running_buildkite?(env) -> buildkite_ci_info(env)
+        true -> nil
       end
     end
 
-    @doc "gets the travis job id out of the environment"
-    @spec travis_job_id(%{String.t => String.t}) :: String.t
-    def travis_job_id(env \\ System.get_env()) do
-      env["TRAVIS_JOB_ID"]
+    @spec running_travis?(%{String.t => String.t}) :: bool
+    def running_travis?(env \\ System.get_env()) do
+      env["TRAVIS"] == "true"
     end
 
-    @spec post_coveralls([atom], String.t, String.t, String.t) :: :ok
-    def post_coveralls(mods, output, job_id, url \\ "https://coveralls.io/api/v1/jobs") do
+    @spec running_buildkite?(%{String.t => String.t}) :: bool
+    def running_buildkite?(env \\ System.get_env()) do
+      env["BUILDKITE"] == "true"
+    end
+
+    @doc "gets the travis ci info out of the environment"
+    @spec travis_ci_info(%{String.t => String.t}) :: %{atom => String.t}
+    def travis_ci_info(env \\ System.get_env()) do
+      ci_info = %{
+        service_name: "travis-ci",
+        service_job_id: env["TRAVIS_JOB_ID"]
+      }
+      if (pull_request = env["TRAVIS_PULL_REQUEST"]) in ["false", nil] do
+        ci_info
+      else
+        Map.put(ci_info, :service_pull_request, pull_request)
+      end
+    end
+
+    @doc "gets the buildkite ci info out of the environment"
+    @spec travis_ci_info(%{String.t => String.t}) :: %{atom => String.t}
+    def buildkite_ci_info(env \\ System.get_env()) do
+      ci_info = %{
+        service_name: "buildkite",
+        service_number: env["BUILDKITE_BUILD_NUMBER"],
+        service_job_id: env["BUILDKITE_JOB_ID"],
+        service_build_url: env["BUILDKITE_BUILD_URL"],
+        service_branch: env["BUILDKITE_BRANCH"],
+      }
+      if (pull_request = env["BUILDKITE_PULL_REQUEST"]) in ["false", nil] do
+        ci_info
+      else
+        Map.put(ci_info, :service_pull_request, pull_request)
+      end
+    end
+
+    @spec post_coveralls([atom], String.t, %{atom => String.t}, String.t) :: :ok
+    def post_coveralls(mods, output, ci_info, url \\ "https://coveralls.io/api/v1/jobs") do
       IO.puts "post to coveralls"
       Application.ensure_all_started(:hackney)
       source = Coverex.Source.coveralls_data(mods)
-      body = Poison.encode!(%{
-        :service_name => "travis-ci",
-        :service_job_id => job_id,
-        :source_files => source
-        })
+      body = ci_info |> Map.put(:source_files, source) |> Poison.encode!
       filename = "./#{output}/coveralls.json"
       File.write(filename, body)
       response = send_http(url, filename, body)
